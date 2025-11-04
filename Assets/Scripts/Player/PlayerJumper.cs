@@ -14,7 +14,7 @@ namespace Cachu.Player
         public Transform model;
 
         [Header("Motion")]
-        public float forwardBaseSpeed = 8f; // no se usa aún, reservado
+        public float forwardBaseSpeed = 8f;
         public float horizMaxSpeed = 10f;
         public float minAirTime = 0.35f;
         public float maxAirTime = 0.65f;
@@ -40,7 +40,7 @@ namespace Cachu.Player
         {
             rb = GetComponent<Rigidbody>();
             rb.constraints = RigidbodyConstraints.FreezeRotation;
-            rb.isKinematic = true; // usamos integración manual para ser deterministas
+            rb.isKinematic = true;
         }
 
         private void Start()
@@ -52,7 +52,6 @@ namespace Cachu.Player
         {
             if (GameFlow.I == null || GameFlow.I.state != GameState.Playing) return;
 
-            // En suelo: abrir ventana y leer input
             if (sensor != null && sensor.IsGrounded && !airborne)
             {
                 if (!waitingInput)
@@ -65,20 +64,15 @@ namespace Cachu.Player
                 if (InputReader.I != null && InputReader.I.Pressed)
                 {
                     float dt = Time.time - landedTime;
-                    Debug.Log("Presion detectada por PlayerJumper");
-
+                    Debug.Log("🟢 Espacio detectado por PlayerJumper");
 
                     if (dt <= perfectWindow)
                     {
                         JumpTo(lastBranch != null ? lastBranch.next : null);
-                        if (AudioTac.I != null) AudioTac.I.Tac(1f, 1.06f);
-                        if (GameFlow.I != null) GameFlow.I.AddScore(1);
                     }
                     else if (dt <= goodWindow)
                     {
                         JumpTo(lastBranch != null ? lastBranch.next : null);
-                        if (AudioTac.I != null) AudioTac.I.Tac(0.9f, 1f);
-                        if (GameFlow.I != null) GameFlow.I.AddScore(1);
                     }
                     else
                     {
@@ -88,7 +82,6 @@ namespace Cachu.Player
                     waitingInput = false;
                 }
 
-                // si se pasó la ventana sin presionar → caída
                 if (waitingInput && Time.time - landedTime > goodWindow)
                 {
                     waitingInput = false;
@@ -96,7 +89,7 @@ namespace Cachu.Player
                 }
             }
 
-            // Integración manual del salto
+            // movimiento manual en el aire
             if (airborne)
             {
                 velocity += Vector3.down * gravity * Time.deltaTime;
@@ -106,15 +99,6 @@ namespace Cachu.Player
                 {
                     var dir = new Vector3(velocity.x, 0f, Mathf.Max(0.01f, velocity.z));
                     var targetRot = Quaternion.LookRotation(dir, Vector3.up);
-                    model.rotation = Quaternion.Slerp(model.rotation, targetRot, rotateLerp * Time.deltaTime);
-                }
-            }
-            else
-            {
-                // En suelo, orientar hacia adelante suave (opcional)
-                if (model)
-                {
-                    var targetRot = Quaternion.LookRotation(Vector3.forward, Vector3.up);
                     model.rotation = Quaternion.Slerp(model.rotation, targetRot, rotateLerp * Time.deltaTime);
                 }
             }
@@ -135,6 +119,7 @@ namespace Cachu.Player
         {
             if (target == null)
             {
+                Debug.LogWarning("❌ JumpTo falló: target nulo");
                 TriggerFall();
                 return;
             }
@@ -144,21 +129,30 @@ namespace Cachu.Player
 
             Vector3 start = transform.position;
             Vector3 end = target.LandPosition;
-            Vector3 planar = new Vector3(end.x - start.x, 0f, end.z - start.z);
+            Vector3 disp = end - start;
+            Vector3 planar = new Vector3(disp.x, 0f, disp.z);
             float horizDist = Mathf.Max(0.1f, planar.magnitude);
-
             float t = Mathf.Clamp(horizDist / horizMaxSpeed, minAirTime, maxAirTime);
 
-            // v = (d - 0.5 g t^2) / t
-            Vector3 disp = end - start;
+            // Fórmula de velocidad inicial
             Vector3 vel = new Vector3(
                 disp.x / t,
                 (disp.y + 0.5f * gravity * t * t) / t,
                 disp.z / t
             );
 
+            Debug.Log($"🌿 JumpTo {target.name} | start={start} end={end} disp={disp} horizDist={horizDist:F2} t={t:F2} vel={vel}");
+
             velocity = vel;
             lastBranch = target;
+
+            // --- TEST TEMPORAL ---
+            // fuerza un salto visible si el cálculo da valores bajos
+            if (velocity.magnitude < 0.1f)
+            {
+                velocity = new Vector3(0, 10f, 10f);
+                Debug.Log("🚀 Salto forzado (debug)");
+            }
 
             StartCoroutine(WaitForLanding(target));
         }
@@ -172,14 +166,11 @@ namespace Cachu.Player
             while (t < maxT)
             {
                 t += Time.deltaTime;
-                // cerca y descendiendo
                 if (Vector3.Distance(transform.position, goal) < 0.35f && velocity.y <= 0f)
                     break;
-
                 yield return null;
             }
 
-            // Snap suave al punto de aterrizaje
             transform.position = goal;
             airborne = false;
             velocity = Vector3.zero;
@@ -187,17 +178,14 @@ namespace Cachu.Player
 
         private void TriggerFall()
         {
-            if (airborne) return; // ya en el aire, no forzar
+            if (airborne) return;
 
             airborne = true;
             waitingInput = false;
-
             if (GameFlow.I != null) GameFlow.I.Miss();
 
-            // Caída vertical
             velocity = Vector3.down * 0.1f;
             gravity = fallGravity;
-
             StartCoroutine(RespawnAfterFall());
         }
 
