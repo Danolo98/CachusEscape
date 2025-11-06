@@ -3,6 +3,7 @@ using System.Collections;
 using UnityEngine;
 using Cachu.Core;
 using Cachu.World;
+using Cachu.Game; // 👈 Importante: añadimos el namespace del ScoreManager
 
 namespace Cachu.Player
 {
@@ -28,13 +29,14 @@ namespace Cachu.Player
         [Header("Fail")]
         public float fallGravity = 40f;
 
-        // --- Estado interno ---
         private Rigidbody rb;
         private bool waitingInput;
         private float landedTime;
         private BranchTarget lastBranch;
         private bool airborne;
         private Vector3 velocity;
+        private bool graceActive = false;
+        private static bool pendingGrace = false;
 
         private void Awake()
         {
@@ -46,6 +48,15 @@ namespace Cachu.Player
         private void Start()
         {
             TryPlaceOnFirstBranch();
+
+            if (pendingGrace)
+            {
+                pendingGrace = false;
+                graceActive = true;
+                waitingInput = true;
+                landedTime = Time.time;
+                Debug.Log("🌿 Tiempo de gracia ACTIVADO tras respawn (persistente)");
+            }
         }
 
         private void Update()
@@ -61,18 +72,40 @@ namespace Cachu.Player
                     lastBranch = sensor.currentBranch;
                 }
 
-                if (InputReader.I != null && InputReader.I.Pressed)
+                if (graceActive)
+                {
+                    if (InputReader.I != null && InputReader.I.Pressed)
+                    {
+                        AudioTac.I?.Tac(1f, 1f);
+                        graceActive = false;
+                        Debug.Log("✨ Primer salto tras respawn — se reactivan tiempos normales");
+                        JumpTo(ResolveNextTarget());
+                        waitingInput = false;
+                    }
+                    return;
+                }
+
+                if (InputReader.I != null && InputReader.I.Pressed && Time.time > landedTime)
                 {
                     float dt = Time.time - landedTime;
-                    Debug.Log("🟢 Espacio detectado por PlayerJumper");
+
+                    if (dt < 0.03f)
+                    {
+                        Debug.Log("⛔ Presionó demasiado pronto, se castiga");
+                        waitingInput = false;
+                        TriggerFall();
+                        return;
+                    }
 
                     if (dt <= perfectWindow)
                     {
-                        JumpTo(lastBranch != null ? lastBranch.next : null);
+                        AudioTac.I?.Tac(1f, 1.15f);
+                        JumpTo(ResolveNextTarget());
                     }
                     else if (dt <= goodWindow)
                     {
-                        JumpTo(lastBranch != null ? lastBranch.next : null);
+                        AudioTac.I?.Tac(1f, 1f);
+                        JumpTo(ResolveNextTarget());
                     }
                     else
                     {
@@ -89,7 +122,6 @@ namespace Cachu.Player
                 }
             }
 
-            // movimiento manual en el aire
             if (airborne)
             {
                 velocity += Vector3.down * gravity * Time.deltaTime;
@@ -115,11 +147,46 @@ namespace Cachu.Player
             }
         }
 
+        private BranchTarget ResolveNextTarget()
+        {
+            if (lastBranch != null && lastBranch.next != null)
+                return lastBranch.next;
+
+            if (sensor != null && sensor.currentBranch != null && sensor.currentBranch.next != null)
+                return sensor.currentBranch.next;
+
+            BranchTarget best = null;
+            float bestDz = float.PositiveInfinity;
+            float zNow = transform.position.z + 0.05f;
+            var all = GameObject.FindObjectsOfType<BranchTarget>();
+
+            foreach (var b in all)
+            {
+                if (!b) continue;
+                float dz = b.transform.position.z - zNow;
+                if (dz > 0f && dz < bestDz)
+                {
+                    best = b;
+                    bestDz = dz;
+                }
+            }
+
+            if (best != null)
+                Debug.Log($"🔍 Rama encontrada automáticamente: {best.name}");
+            else
+                Debug.LogWarning("⚠️ No se encontró rama válida por delante");
+
+            return best;
+        }
+
         private void JumpTo(BranchTarget target)
         {
             if (target == null)
+                target = ResolveNextTarget();
+
+            if (target == null)
             {
-                Debug.LogWarning("❌ JumpTo falló: target nulo");
+                Debug.LogWarning("❌ JumpTo falló: target nulo (tras resolver)");
                 TriggerFall();
                 return;
             }
@@ -129,51 +196,47 @@ namespace Cachu.Player
 
             Vector3 start = transform.position;
             Vector3 end = target.LandPosition;
-            Vector3 disp = end - start;
-            Vector3 planar = new Vector3(disp.x, 0f, disp.z);
-            float horizDist = Mathf.Max(0.1f, planar.magnitude);
-            float t = Mathf.Clamp(horizDist / horizMaxSpeed, minAirTime, maxAirTime);
 
-            // Fórmula de velocidad inicial
-            Vector3 vel = new Vector3(
-                disp.x / t,
-                (disp.y + 0.5f * gravity * t * t) / t,
-                disp.z / t
-            );
+            float tTotal = Mathf.Lerp(minAirTime, maxAirTime, 0.5f);
+            float jumpArcHeight = 1f;
 
-            Debug.Log($"🌿 JumpTo {target.name} | start={start} end={end} disp={disp} horizDist={horizDist:F2} t={t:F2} vel={vel}");
+            StopAllCoroutines();
+            StartCoroutine(JumpArcCoroutine(start, end, tTotal, jumpArcHeight));
 
-            velocity = vel;
             lastBranch = target;
+            AudioTac.I?.Tac(1f, 1.05f);
 
-            // --- TEST TEMPORAL ---
-            // fuerza un salto visible si el cálculo da valores bajos
-            if (velocity.magnitude < 0.1f)
-            {
-                velocity = new Vector3(0, 10f, 10f);
-                Debug.Log("🚀 Salto forzado (debug)");
-            }
-
-            StartCoroutine(WaitForLanding(target));
+            Debug.Log($"🌿 JumpTo (forzado) de {start} → {end}");
         }
 
-        private IEnumerator WaitForLanding(BranchTarget target)
+        private IEnumerator JumpArcCoroutine(Vector3 start, Vector3 end, float duration, float height)
         {
-            float maxT = 2f;
-            float t = 0f;
-            var goal = target.LandPosition;
+            float time = 0f;
+            airborne = true;
 
-            while (t < maxT)
+            while (time < duration)
             {
-                t += Time.deltaTime;
-                if (Vector3.Distance(transform.position, goal) < 0.35f && velocity.y <= 0f)
-                    break;
+                time += Time.deltaTime;
+                float t = time / duration;
+                float yOffset = 4 * height * t * (1 - t);
+                Vector3 pos = Vector3.Lerp(start, end, t);
+                pos.y = Mathf.Lerp(start.y, end.y, t) + yOffset;
+                transform.position = pos;
+
                 yield return null;
             }
 
-            transform.position = goal;
+            transform.position = end;
             airborne = false;
             velocity = Vector3.zero;
+
+            // ✅ Aquí registramos el salto exitoso:
+            var score = FindObjectOfType<ScoreManager>();
+            if (score != null)
+            {
+                score.AddJump();
+                Debug.Log("✅ Salto registrado por ScoreManager");
+            }
         }
 
         private void TriggerFall()
@@ -184,6 +247,9 @@ namespace Cachu.Player
             waitingInput = false;
             if (GameFlow.I != null) GameFlow.I.Miss();
 
+            pendingGrace = true;
+            AudioTac.I?.Tac(0.8f, 0.7f);
+
             velocity = Vector3.down * 0.1f;
             gravity = fallGravity;
             StartCoroutine(RespawnAfterFall());
@@ -191,9 +257,25 @@ namespace Cachu.Player
 
         private IEnumerator RespawnAfterFall()
         {
-            yield return new WaitForSecondsRealtime(0.6f);
-            if (GameFlow.I != null && GameFlow.I.state == GameState.Playing)
-                GameFlow.I.Restart();
+            // Fade con DOTween
+            if (Cachu.UI.ScreenFader.I != null)
+            {
+                Cachu.UI.ScreenFader.I.FadeOutThenIn(() =>
+                {
+                    if (GameFlow.I != null && GameFlow.I.state == GameState.Playing)
+                        GameFlow.I.Restart();
+                });
+            }
+            else
+            {
+                // Si no hay ScreenFader, usa el comportamiento normal
+                yield return new WaitForSecondsRealtime(0.6f);
+                if (GameFlow.I != null && GameFlow.I.state == GameState.Playing)
+                    GameFlow.I.Restart();
+            }
+
+            yield break;
         }
+
     }
 }

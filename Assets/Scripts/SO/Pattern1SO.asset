@@ -14,7 +14,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   localPositions:
   - {x: 0, y: 0, z: 4}
-  - {x: 0, y: 0.2, z: 8}
-  - {x: 0, y: 0, z: 12}
+  - {x: 0, y: 3, z: 8}
+  - {x: 0, y: -3, z: 12}
   weight: 1
   difficulty: 1
